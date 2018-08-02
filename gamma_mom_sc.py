@@ -4,10 +4,13 @@
 Created on Mon Jul 16 13:46:50 2018
 
 @author: Robert Irvin
-"""
-""" Generate Gamma - Second moment table"""
-import numpy as np
 
+Generate Gamma/Doppler - Moments table
+
+
+Change basepath to where you want to save the plots"""
+
+import numpy as np
 import scipy.constants
 import scipy.fftpack as fft
 from scipy.interpolate import interp2d
@@ -15,13 +18,20 @@ from os.path import join,exists
 import os
 import datetime as dt
 import matplotlib
-current_cmap = matplotlib.cm.inferno
+current_cmap = matplotlib.cm.inferno #set masked values to white
 current_cmap.set_bad('white',1.)
 import matplotlib.pyplot as plt
+
 basepath = '/Users/E31345/pydentify' #where to save plots
+
 def table(gam, dop_shift):
-    """Calculates first and second moments from an aliased 
-    lorentzian spectrum generated for a given doppler shift and gamma"""
+    """Returns second and first moments calculated from an aliased 
+    lorentzian spectrum generated for a given gamma and doppler shift
+    
+    Example
+    --------
+    >>> table(80,25)
+    (53.324606805301372, 23.053279708202361)"""
     
     gamma = gam
     doppler_shift = dop_shift #in angular frequency
@@ -53,9 +63,8 @@ def table(gam, dop_shift):
     return  sm,fm
 
 def new_table(gam,dop_shift):
-
-    #gam, dop_shift = np.array((80)),np.array((25))
-    """Like table expcet for general arrays of doppler shift and gamma"""
+    """*In development*
+    Like table expcet for general arrays of doppler shift and gamma"""
     gamma, doppler_shift = np.meshgrid(gam,dop_shift)  
     times = np.linspace(-.256,.256 , 255) # times matching the PFISR experiment
     
@@ -90,6 +99,11 @@ def new_table(gam,dop_shift):
     return sm,fm
 
 def plot_some_curves():
+    """Plots detailing the relations between first/second moment 
+    vs. gamma for various doppler shifts. Some analytical relations are
+    tried (failed)
+    
+    >>> plot_some_curves()"""
     # these first two functions are some attempted analytic relations
     def spec_width(gamma, f_0):
         return np.sqrt((gamma*f_0/np.pi**2)  - 0.5*(gamma**2/np.pi**3)*np.arctan(2*np.pi*f_0/gamma))
@@ -140,6 +154,13 @@ def plot_some_curves():
 
 
 def forward_interp2d(resolution, kind):
+    """Save plots of moments vs. gamma and doppler shift with contours for a given resolution in
+    doppler shift and either 'cubic','quintic', or 'linear' interpolation
+    
+    Example
+    --------
+    >>> forward_interp2d(20,'cubic')
+    """
     # Here we play with interp2d, generate doppler and gamma arrays
     doppler_array = np.linspace(0,200,int(200/resolution)+1)
     gamma_array   = np.linspace(1,500,500) 
@@ -191,16 +212,17 @@ def forward_interp2d(resolution, kind):
     
     plt.show(fig)
     plt.close(fig)
-    
-# These figures seem to agree quite well with the prior figures. 
-# so interpolation in the forward direction seems to be working, let 
-# us try the inverse problem now
 
 def inverse_interp2d(parameter , resolution, kind ):
-    """ parameter is a string, either 'doppler' or 'gamma' depending on what you want to plot
+    """Save plots of gamma/doppler shift vs. moments. Parameter is a string, 
+    either 'doppler' or 'gamma' depending on what you want to plot
     Resolution is an integer that denotes the number of doppler
      shift frequencies used in calculation. Note doppler shift always ranges from
-     0 to 200 Hz"""
+     0 to 200 Hz
+     
+     Example
+     -------
+     >>> inverse_interp2d('doppler',20,'cubic')"""
 
     # Here we generate doppler and gamma arrays
     doppler_array = np.linspace(0,200,int(200/resolution)+1)
@@ -216,10 +238,7 @@ def inverse_interp2d(parameter , resolution, kind ):
         sm, fm = table(gam = g2[i] , dop_shift=dop)
         
         x_bar[i] = fm ;del_xsquare[i] = sm
- 
-    
-    
-    
+
     #first and second moment arrays for pcolormesh plotting
     x2 = np.linspace(0,200,201)    
     del2 = np.linspace(0,170,171)
@@ -230,8 +249,6 @@ def inverse_interp2d(parameter , resolution, kind ):
     plt.title('Point density in moment phase space')
     plt.show()
     plt.close()
-    
-    
     
     # generate f, the figure title, and the colorbar limits based on parameter
     
@@ -247,9 +264,7 @@ def inverse_interp2d(parameter , resolution, kind ):
         
     x,y = np.meshgrid(x2,del2) #generate meshgrid 
     z_out = f(x2,del2)              # calculate parameter using f
-    
 
-    
     z = np.ma.masked_where(np.isnan(z_out),z_out)
     
     fig,ax = plt.subplots(figsize=(10,8))
@@ -270,13 +285,14 @@ def inverse_interp2d(parameter , resolution, kind ):
 
 
 def error_plot(resolution,kind):
-
+    """Plots the fractional error in first and second moment from 
+    doppler and gamma values returned by inverse_interp2d. Log scale
+    
+    Example
+    -------
+    >>> error_plot(20,'cubic')"""
     fm,sm,doppler = inverse_interp2d('doppler',resolution,kind)
     fm,sm,gamma = inverse_interp2d('gamma',resolution,kind)
-    #second,first = new_table(gamma.ravel(),doppler.ravel())
-    
-     #   f_gamma = interp2d(fm,sm, gamma)
-      #  f_doppler = interp2d(fm,sm, doppler)
     #initialize difference array
     first_diff = np.zeros((sm.shape[0] , fm.shape[0]))
     second_diff= np.zeros((sm.shape[0] , fm.shape[0]))
