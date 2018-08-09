@@ -14,6 +14,8 @@ import numpy as np
 import scipy.constants
 import scipy.fftpack as fft
 from scipy.interpolate import interp2d
+from scipy.interpolate import griddata
+from scipy.optimize import curve_fit
 from os.path import join,exists
 import os
 import datetime as dt
@@ -22,7 +24,20 @@ current_cmap = matplotlib.cm.inferno #set masked values to white
 current_cmap.set_bad('white',1.)
 import matplotlib.pyplot as plt
 
-basepath = '/Users/E31345/pydentify' #where to save plots
+
+basepath = '/Users/E31345/pydentify' #where to save plots for plot_some_curves, generate_table, and fitstat
+
+def tri(N):
+    """generates triangular window array of length 2N+1 used in table
+    
+    Example
+    -------
+    >>> tri(2)
+    array([ 0. ,  0.5,  1. ,  0.5,  0. ])"""
+    arr = np.zeros(N+1)
+    for i in range(N+1):
+        arr[i]  =  ((N-i))/float(N)
+    return np.pad(arr,(len(arr)-1,0),'reflect')
 
 def table(gam, dop_shift):
     """Returns second and first moments calculated from an aliased 
@@ -39,15 +54,7 @@ def table(gam, dop_shift):
     
     if type(gam)==np.ma.core.MaskedConstant or type(dop_shift)==np.ma.core.MaskedConstant:
         return np.nan,np.nan
-    
-    
-    def tri(N):
-        """generates triangular window array"""
-        arr = np.zeros(N+1)
-        for i in range(N+1):
-            arr[i]  =  ((N-i))/float(N)
-        return np.pad(arr,(len(arr)-1,0),'reflect')
-    
+
        # len(times) = 2*N +1
     tri_win = tri((len(times)-1)/2)
     # generate acf. needs to be multiplied by a triangular window
@@ -62,46 +69,11 @@ def table(gam, dop_shift):
     sm = np.sqrt(np.sum((frequency-fm)**2 * np.abs(spectrum))/zm)
     return  sm,fm
 
-def new_table(gam,dop_shift):
-    """*In development*
-    Like table expcet for general arrays of doppler shift and gamma"""
-    gamma, doppler_shift = np.meshgrid(gam,dop_shift)  
-    times = np.linspace(-.256,.256 , 255) # times matching the PFISR experiment
-    
-    
-    
-    def tri(N):
-        """generates triangular window array"""
-        arr = np.zeros(N+1)
-        for i in range(N+1):
-            arr[i]  =  ((N-i))/float(N)
-        return np.pad(arr,(len(arr)-1,0),'reflect')
-    
-       # len(times) = 2*N +1
-    tri_win = tri((len(times)-1)/2)
-    
-    #expontential factor
-    exponent = -np.einsum('...i,j->...ij',gamma,np.abs(times)) + 1j*2*np.pi*np.einsum('...i,j->...ij',doppler_shift,times)
-    
-    # generate acf. needs to be multiplied by a triangular window
-    acf = tri_win * np.exp(exponent)
-    
-    spectrum = fft.fft(acf)
-    frequency = fft.fftfreq(times.shape[0],d=.002) # 2ms IPP
-    
-    #Calculate the spectra moments
-    zm = np.sum(np.abs(spectrum),axis=-1)
-    fm = np.sum(np.abs(spectrum)*frequency,axis=-1)/zm
-    
-    f_bar =np.repeat(fm[:,:,np.newaxis],255,axis=-1) # for broadcsting
-    
-    sm = np.sqrt(np.sum((frequency-f_bar)**2 * np.abs(spectrum),axis=-1)/zm)
-    return sm,fm
 
 def plot_some_curves():
     """Plots detailing the relations between first/second moment 
     vs. gamma for various doppler shifts. Some analytical relations are
-    tried (failed)
+    tried (and are underestimated)
     
     >>> plot_some_curves()"""
     # these first two functions are some attempted analytic relations
@@ -152,24 +124,22 @@ def plot_some_curves():
     plt.show()
     plt.close(fig)
 
-
-def forward_interp2d(resolution, kind):
+def generate_table(resolution,kind):
+    
     """Save plots of moments vs. gamma and doppler shift with contours for a given resolution in
-    doppler shift and either 'cubic','quintic', or 'linear' interpolation
+    doppler shift and either 'cubic','nearest', or 'linear' interpolation
     
     Example
     --------
-    >>> forward_interp2d(20,'cubic')
+    >>> generate_table(1,'cubic')
     """
-    # Here we play with interp2d, generate doppler and gamma arrays
+    # initialize gamma and doppler space
     doppler_array = np.linspace(0,200,int(200/resolution)+1)
-    gamma_array   = np.linspace(1,500,500) 
-   
-    
+    gamma_array   = np.linspace(1,50,500)**2 
     # generate d2,g2 1D arrays that make ordered pairs of gamma and doppler    
     d2 = np.repeat(doppler_array,gamma_array.shape[0]) 
     g2 = np.tile(gamma_array, doppler_array.shape[0])
-    #iniitlaize moment arrays
+    #iniitlaize moment arrays and calculate for each doppler, gamma ordered pair
     x_bar , del_xsquare = np.zeros((g2.shape)),np.zeros((g2.shape))
     
     for i,dop in enumerate(d2):
@@ -177,122 +147,93 @@ def forward_interp2d(resolution, kind):
         
         x_bar[i] = fm ;del_xsquare[i] = sm
     
-    f = interp2d(g2 , d2, x_bar,kind=kind)   # sanity check (gamma,doppler) --> (fm,sm)
-    
-    g = interp2d(g2 , d2, del_xsquare,kind=kind)   # sanity check (gamma,doppler) --> (fm,sm)
-    
-
-    #generate pcolormesh figures
-    x,y = np.linspace(0,500,5001),np.linspace(0,200,2001) #fine resolution doppler and gamma
-
-    
-    first_mom = f(x,y)          # generate moments for each doppler/gamma 
-    second_mom= g(x,y)          # ordered pair
-    
+    # generate griddata for first and second moments
+    x,y = np.meshgrid(np.linspace(0,500,501),np.linspace(0,200,201)) # gamma/doppler grid
+    points = (d2,g2)
+    grid_fm = griddata(points, x_bar,(y,x),method=kind)
+    grid_sm = griddata(points, del_xsquare,(y,x),method=kind)
+       
+    ###### Forward interp (gam, dop)==>(sm,fm)##########
     fig,ax = plt.subplots(1,2,figsize=(10,8)) #initialize figure
     # first block is first moment figure routine. pcolormesh and colorbar
-    im0 = ax[0].pcolormesh(x,y,first_mom,cmap='inferno',vmin=0,vmax=200)
-    ax[0].contour(x,y,first_mom,cmap='viridis_r',vmin=0,vmax=200)
+    im0 = ax[0].pcolormesh(x,y,grid_fm,cmap='inferno',vmin=0,vmax=200)
+    c0 = ax[0].contour(x,y,grid_fm,cmap='viridis_r',vmin=0,vmax=200)
+    labels = map(int,list(c0.levels))
+    ax[0].clabel(c0,fmt='%1.1f')
     ax[0].set_ylabel('Doppler shift (Hz)');ax[0].set_xlabel('Gamma/HWHM (Hz)')
     ax[0].set_title(kind+' First Moment (Hz) resolution ='+str(resolution)+'Hz')
     fig.colorbar(im0,ax=ax[0])
-
+    
     # second block is second moment figure routine
-    im1 = ax[1].pcolormesh(x,y,(second_mom),cmap='inferno',vmin=0,vmax=170)
-    ax[1].contour(x,y,(second_mom),cmap='viridis_r',vmin=0,vmax=170)
+    im1 = ax[1].pcolormesh(x,y,(grid_sm),cmap='inferno',vmin=0,vmax=170)
+    c1 = ax[1].contour(x,y,(grid_sm),cmap='viridis_r',vmin=0,vmax=170)
+    ax[1].clabel(c1)
     ax[1].set_ylabel('Doppler shift (Hz)');ax[1].set_xlabel('Gamma/HWHM (Hz)')
     ax[1].set_title(kind+' Second Moment (Hz) resolution ='+str(resolution)+'Hz')
     fig.colorbar(im1,ax=ax[1])
-   
-    if not exists(join(basepath,'forward_interp2d')):
-        os.mkdir(join(basepath,'forward_interp2d'))
-    #   kind+'_'+parameter+'_inv_interp_res_'+str(resolution)+'.png'
-    string = '%s_for_interp2d_res_%s.png'%(kind,str(resolution))
-    plt.savefig(join(basepath,'forward_interp2d',string))    
+       
+    path = join(basepath,'griddata',kind,str(resolution))
+    
+    if not exists(path):
+        os.makedirs(path)
+    string = '%s_forward_griddata_res_%s.png'%(kind,str(resolution)+'Hz_res')
+    plt.savefig(join(path,string),dpi=300)    
+    plt.show(fig)
+    plt.close(fig) 
+     
+    ######## Inverse interp (sm,fm)==>(gam,dop)########
+    # first moment by second moment grid
+    x,y = np.meshgrid(np.linspace(0,200,201),np.linspace(0,170,171))
+    points = (del_xsquare,x_bar)
+    grid_gam = griddata(points , g2 , (y,x),method=kind)
+    grid_dop = griddata(points , d2 , (y,x),method=kind)
+    
+    # save these arrays for error plot
+    grid_gam_out = grid_gam
+    grid_dop_out = grid_dop
+    
+    # mask arrays
+    grid_gam = np.ma.masked_where(np.isnan(grid_gam),grid_gam)
+    grid_dop = np.ma.masked_where(np.isnan(grid_dop),grid_dop)
+
+    fig,ax = plt.subplots(1,2,figsize=(10,8)) #initialize figure
+    # first block is first moment figure routine. pcolormesh and colorbar
+    im0 = ax[0].pcolormesh(x,y,grid_dop,cmap='inferno',vmin=0,vmax=200)
+    c0 = ax[0].contour(x,y,grid_dop,cmap='viridis_r',vmin=0,vmax=200)
+    ax[0].clabel(c0)
+    ax[0].set_ylabel('Second moment (Hz)');ax[0].set_xlabel('First moment (Hz)')
+    ax[0].set_title(kind+' Doppler shift (Hz) resolution ='+str(resolution)+'Hz')
+    fig.colorbar(im0,ax=ax[0])
+    
+    # second block is second moment figure routine
+    im1 = ax[1].pcolormesh(x,y,np.log10(grid_gam),cmap='inferno',vmin=-1,vmax=4)
+    c1 = ax[1].contour(x,y,np.log10(grid_gam),cmap='viridis_r',vmin=-1,vmax=4)
+    ax[1].clabel(c1)
+    ax[1].set_ylabel('Second moment (Hz)');ax[1].set_xlabel('First moment (Hz)')
+    ax[1].set_title(kind+' log10(Gamma/HWHM) (Hz) resolution ='+str(resolution)+'Hz')
+    fig.colorbar(im1,ax=ax[1])
+    
+    string ='%s_inverse_griddata_res_%s.png'%(kind,str(resolution))
+    plt.savefig(join(path,string),dpi=300)
     
     plt.show(fig)
-    plt.close(fig)
-
-def inverse_interp2d(parameter , resolution, kind ):
-    """Save plots of gamma/doppler shift vs. moments. Parameter is a string, 
-    either 'doppler' or 'gamma' depending on what you want to plot
-    Resolution is an integer that denotes the number of doppler
-     shift frequencies used in calculation. Note doppler shift always ranges from
-     0 to 200 Hz
-     
-     Example
-     -------
-     >>> inverse_interp2d('doppler',20,'cubic')"""
-
-    # Here we generate doppler and gamma arrays
-    doppler_array = np.linspace(0,200,int(200/resolution)+1)
-    gamma_array   = np.linspace(1,500,500)
+    plt.close(fig) 
     
-    # 1d arrays denoting ordered pairs
-    d2 = np.repeat(doppler_array,gamma_array.shape[0]) 
-    g2 = np.tile(gamma_array, doppler_array.shape[0])
+    ###### Scatter Plot Moment Phase Space #######
     
-    x_bar , del_xsquare = np.zeros((g2.shape)),np.zeros((g2.shape)) #initialize first/second moment arays
-    
-    for i,dop in enumerate(d2):   #loop through doppler array/gamma, calculating moments at each
-        sm, fm = table(gam = g2[i] , dop_shift=dop)
-        
-        x_bar[i] = fm ;del_xsquare[i] = sm
-
-    #first and second moment arrays for pcolormesh plotting
-    x2 = np.linspace(0,200,201)    
-    del2 = np.linspace(0,170,171)
-    # generate scatter plot showing density of points 
     plt.scatter(x_bar,del_xsquare)
-    plt.xlim(x2[0],x2[-1])      ;plt.xlabel('Second moment (Hz)')
-    plt.ylim(del2[0],del2[-1]) ; plt.ylabel('First moment (Hz)')
-    plt.title('Point density in moment phase space')
+    plt.xlim(x[0,0],x[0,-1])      ;plt.ylabel('Second moment (Hz)')
+    plt.ylim(y[0,0],y[-1,0]) ; plt.xlabel('First moment (Hz)')
+    plt.title('Point density in moment phase space %s res=%sHz'%(kind,str(resolution)))
+    string ='%s_phasespace_griddata_res_%s.png'%(kind,str(resolution))
+    plt.savefig(join(path,string),dpi=300)
     plt.show()
     plt.close()
     
-    # generate f, the figure title, and the colorbar limits based on parameter
+    ######## Moment Error plot #########
     
-    if parameter == 'doppler':
-        title = kind+'Doppler shift (Hz) resolution ='+str(resolution)
-        #use interp2d
-        f = interp2d(x_bar ,del_xsquare , d2,kind= kind,fill_value= np.nan) #(fm,sm) -> dop shift
-        cmax = doppler_array[-1]
-    elif parameter == 'gamma':
-        title = kind+' Gamma/HWHM (Hz) resolution ='+str(resolution)
-        f = interp2d(x_bar ,del_xsquare , g2, kind=kind,fill_value=np.nan) #(fm,sm) -> gamma
-        cmax = gamma_array[-1]
-        
-    x,y = np.meshgrid(x2,del2) #generate meshgrid 
-    z_out = f(x2,del2)              # calculate parameter using f
-
-    z = np.ma.masked_where(np.isnan(z_out),z_out)
-    
-    fig,ax = plt.subplots(figsize=(10,8))
-    im = ax.pcolormesh(x,y,z,cmap=current_cmap,vmin=0,vmax = cmax)
-    ax.set_xlabel('First Moment (Hz)');ax.set_ylabel('Second Moment (Hz)')
-    fig.suptitle(title)
-    fig.colorbar(im)
-    
-    if not exists(join(basepath,'inv_interp2d',kind,str(resolution))):
-        os.mkdir(join(basepath,'inv_interp2d',kind,str(resolution)))
-    
-    string ='%s_%s_inv_interp2d_res_%s.png'%(kind,parameter,str(resolution))
-    plt.savefig(join(basepath,'inv_interp2d',kind,str(resolution),string))
-    plt.show(fig)
-    plt.close(fig)
-    del f
-    return x2,del2,z_out
-
-
-def error_plot(resolution,kind):
-    """Plots the fractional error in first and second moment from 
-    doppler and gamma values returned by inverse_interp2d. Log scale
-    
-    Example
-    -------
-    >>> error_plot(20,'cubic')"""
-    fm,sm,doppler = inverse_interp2d('doppler',resolution,kind)
-    fm,sm,gamma = inverse_interp2d('gamma',resolution,kind)
+    fm,sm,doppler = x[0,:],y[:,0],grid_dop_out
+    fm,sm,gamma = x[0,:],y[:,0],grid_gam_out
     #initialize difference array
     first_diff = np.zeros((sm.shape[0] , fm.shape[0]))
     second_diff= np.zeros((sm.shape[0] , fm.shape[0]))
@@ -318,18 +259,257 @@ def error_plot(resolution,kind):
     # first block is first moment figure routine. pcolormesh and colorbar
     im0 = ax[0].pcolormesh(x,y,np.log10(first_diff),cmap='inferno',vmin=-7,vmax=0)
     ax[0].set_ylabel('Second Moment (Hz)');ax[0].set_xlabel('First Moment (Hz)')
-    ax[0].set_title(kind+' FM Error Fraction resolution ='+str(resolution)+'Hz')
+    ax[0].set_title(kind+' log10 FM Error Fraction resolution ='+str(resolution)+'Hz')
     fig.colorbar(im0,ax=ax[0])
     
     # second block is second moment figure routine
     im1 = ax[1].pcolormesh(x,y,np.log10(second_diff),cmap='inferno',vmin=-7,vmax=0)
     ax[1].set_ylabel(' Second Moment (Hz)');ax[1].set_xlabel('First Moment (Hz)')
-    ax[1].set_title(kind+' SM Error Fraction resolution ='+str(resolution)+'Hz')
+    ax[1].set_title(kind+' log10 SM Error Fraction resolution ='+str(resolution)+'Hz')
     fig.colorbar(im1,ax=ax[1])
     
-    string = '%s_table_interp2d_res_%s.png'%(kind,str(resolution))
-    plt.savefig(join(basepath,'inv_interp2d',kind,str(resolution),string))
+    string = '%s_table_griddata_res_%s.png'%(kind,str(resolution))
+    plt.savefig(join(path,string),dpi=300)
     
     plt.show(fig)
     plt.close(fig)
+
+    return points, d2, g2
+# run generate_table. points,d2 and g2 are global variables that are used in fitstat(exp)
+points, d2, g2 = generate_table(1,'cubic')
+
+def gd(sm,fm):
+    """Inverse of table function. Returns arrays of gamma and doppler shifts given
+    arrays of first and second moment
+    
+    Example
+    -------
+    >>> gd(np.array([50,100]),np.array([15,15]))
+    (array([  70.09027157,  359.67831203]), array([ 16.0844093 ,  23.00540148]))"""
+    gam = griddata(points, g2, (sm,np.abs(fm)))
+    dop = griddata(points, d2, (sm,np.abs(fm)))
+    return gam,dop*(np.sign(fm)) 
+
+def datetime_bin(he):
+    """return tuple of half hour datetime range 
+    
+    Example
+    -------
+    >>> import datetime as dt
+    >>> x = dt.datetime.now()
+    >>> x
+    datetime.datetime(2018, 8, 8, 15, 33, 23, 420589)
+    >>> datetime_bin(x)
+    (datetime.datetime(2018, 8, 8, 15, 30), datetime.datetime(2018, 8, 8, 16, 0))"""
+    
+    td = dt.timedelta(minutes=30)
+    floor = he.replace(minute=0,second=0,microsecond=0)
+    if he - floor <td:
+        return (floor,floor+td)
+    elif  he - floor >= td:
+        return (floor + td,floor+2*td) 
+
+def fitstat(exp):
+    """ 
+    Example
+    -------
+    >>> fitstat('20170508.001')
+    array([[ (datetime.datetime(2017, 5, 8, 3, 0), datetime.datetime(2017, 5, 8, 3, 30)),
+        1],
+       [ (datetime.datetime(2017, 5, 8, 3, 30), datetime.datetime(2017, 5, 8, 4, 0)),
+        1],
+       [ (datetime.datetime(2017, 5, 8, 4, 0), datetime.datetime(2017, 5, 8, 4, 30)),
+        1],
+       [ (datetime.datetime(2017, 5, 8, 4, 30), datetime.datetime(2017, 5, 8, 5, 0)),
+        0],
+       [ (datetime.datetime(2017, 5, 8, 5, 0), datetime.datetime(2017, 5, 8, 5, 30)),
+        0],
+       [ (datetime.datetime(2017, 5, 8, 5, 30), datetime.datetime(2017, 5, 8, 6, 0)),
+        0]], dtype=object)"""
+    
+    #### read in moments/ altitude/ time arrays
+    dname = exp
+    spec_dregion_path = '/Volumes/scratch/AMISR_Work/spectra_Dregion' 
+    momentdir = join(spec_dregion_path,dname,'moments')
+    altitude_array,fm_array,noise_array,sm_array,utime_array,zm_array = np.load(join(momentdir,'altitude'))/1000,np.load(join(momentdir,
+                'first_moment')),np.load(join(momentdir,'noise')),np.load(join(momentdir,
+                'second_moment')),np.load(join(momentdir,'unixtime')),np.load(join(momentdir,'zero_moment'))
+
+
+    
+    # look at first beam
+    fm_array = fm_array[:,0]
+    sm_array = sm_array[:,0]
+    
+    # lay them out
+    fms = fm_array.ravel()
+    sms = sm_array.ravel()
+    # calculate doppler shift and gamma for each ordered pair
+    a,b = gd(sms,fms)  
+
+    arr = np.array(map(table,a,b))
+    print 'Done'
+    
+    
+    #first column of arr is second moment , second colum
+    # is first moment
+    
+    new_sm = arr[:,0].reshape(fm_array.shape)
+    new_fm = arr[:,1].reshape(fm_array.shape)
+    
+    # mask arrays
+    new_sm = np.ma.masked_where(np.isnan(new_sm),new_sm)
+    new_fm = np.ma.masked_where(np.isnan(new_fm),new_fm)
+    
+    plt.pcolormesh(utime_array,altitude_array[0],new_sm.T,cmap='inferno',vmin=0,vmax=150)
+    plt.colorbar(); plt.show(); plt.close()
+    
+    plt.pcolormesh(utime_array,altitude_array[0],new_fm.T,cmap='RdBu_r',vmin=-250,vmax=250)
+    plt.colorbar(); plt.show(); plt.close()
+
+    #plot gam and doppler
+    
+    new_gam = a.reshape(fm_array.shape)
+    new_dop = b.reshape(fm_array.shape)
+    
+    # mask arrays
+    new_gam = np.ma.masked_where(np.isnan(new_gam),new_gam)
+    new_dop = np.ma.masked_where(np.isnan(new_dop),new_dop)
+    
+    plt.pcolormesh(utime_array,altitude_array[0],np.log10(new_gam).T,cmap='inferno',vmin=1,vmax=4)
+    plt.colorbar(); plt.show(); plt.close()
+    
+    plt.pcolormesh(utime_array,altitude_array[0],new_dop.T,cmap='RdBu_r',vmin=-200,vmax=200)
+    plt.colorbar(); plt.show(); plt.close()
+    
+    #calculate signal to noise ratio
+    snr = 10*np.log10(zm_array/noise_array[:,:,np.newaxis])
+    plt.pcolormesh(utime_array,altitude_array[0],snr[:,0].T,vmin=0,vmax=20,cmap='inferno')
+    plt.colorbar(); plt.show(); plt.close()
+    
+
+    
+    ###### Automated Algorithm Scale Height Fitting Code ##########
+    # only look at up beam 
+    ind_beam = 0
+    
+    alt_array = altitude_array[ind_beam]
+    dB_cutoff = 15          # power threshold
+    alt_cutoff = [60,120]  # relevant dregion altitudes
+    alt_res = alt_array[1]-alt_array[0]
+    
+    # get indexes of the relavant altidues
+    idxs = (np.abs(alt_array - alt_cutoff[0]).argmin(),
+            np.abs(alt_array - alt_cutoff[1]).argmin())
+    
+    snr_beam =       snr[:,ind_beam, idxs[0]:idxs[1]]
+    alt_array = alt_array[idxs[0]:idxs[1]]
+    gam_out =       new_gam[:,idxs[0]:idxs[1]]
+    
+    # initialize array of fitting parameters
+    popt_array = np.zeros((len(utime_array),4))
+    
+    for i,utime in enumerate(utime_array):
+        #iterate through time axis, example start with first time
+        time = i
+        snr_loop = snr_beam[time]
+        gam = gam_out[time]
+    
+    #    plt.plot(snr_loop,alt_array) ;plt.suptitle('snr');plt.show(); plt.close()
+    #    plt.plot(alt_array,gam) ;plt.suptitle('gam');plt.show(); plt.close()
+        
+        
+        I = np.where(snr_loop < dB_cutoff)
+        gam[I] = np.nan
+        alt_array[I]=np.nan
+        
+        
+        
+        def func(z,z_0,b,c,d):
+            output = np.ones(z.shape)*c*np.exp(b*(d-z_0))
+            
+            inds = np.where( z < d)       
+            output[inds] = c*np.exp(b*(z[inds]-z_0))
+            
+            return output
+        
+        
+        valid = ~(np.isnan(gam) | np.isnan(alt_array))
+        indice = len(gam[valid])//4 # the point used for the initial guess
+        
+        # Need at least 5 points to fit a curve
+        if len(gam[valid]) >= 5:
+            try:
+                popt,pcov = curve_fit(func,alt_array[valid],gam[valid],
+                            p0=[alt_array[valid][indice],1/7.,gam[valid][indice],90.])
+                if i%15 ==0 or i==44 or i==20 or i==58:
+                    plt.plot(alt_array,gam,'-o');plt.plot(alt_array[valid],func(alt_array[valid],*popt),'r',
+                             label = '%.0f*exp(z - %.2f)/%.2f'%((popt[2]),(popt[0]),(1/popt[1]),)) 
+                    this_time = dt.datetime.utcfromtimestamp(utime).strftime('%Y%m%d %H:%M')
+                    plt.suptitle('fitstat %s'%(this_time)); plt.xlabel('Altitude (km)')
+                    plt.ylabel('Gamma/HWHM (Hz)');plt.legend(); plt.show(); plt.close()
+                    
+                scale_height = 1/popt[1]
+                
+                popt_array[i , 0] = scale_height
+                popt_array[i,1]   = popt[0]
+                popt_array[i,2]   = popt[2]
+                popt_array[i,3]   = popt[3]
+            except RuntimeError:
+                popt_array[i , 0] = np.nan
+                popt_array[i,1]   = np.nan
+                popt_array[i,2]   = np.nan
+                popt_array[i,3]   = np.nan
+        else:
+            popt_array[i , 0] = np.nan
+            popt_array[i,1]   = np.nan
+            popt_array[i,2]   = np.nan
+            popt_array[i,3]   = np.nan
+    
+    
+       
+    #### Convert our fitted parameters array to binary half hour binning data ###
+    u =[dt.datetime.utcfromtimestamp(utime_array[i]) for i in range(len(utime_array))]
+    uu = [datetime_bin(i) for i in u]
+    uuu = sorted(set(uu))
+    d= {el:[] for el in uuu}
+    
+    for i,key in enumerate(uu):
+        d[key].append(popt_array[i,0])
+    
+    
+    
+    arr = np.zeros((len(uuu),2),dtype=object)
+    for j,tup in enumerate(uuu):
+        data = d[tup]
+        good_data = [i for i in data if not np.isnan(i)]
+        # if more than half contain scale height between good range
+        percent = sum(i < 15 for i in good_data)/float(len(data))
+        if percent >= 0.5:
+            val = 1
+        else:
+            val=0
+        
+        arr[j,0] = tup
+        arr[j,1] = val
+    # save binary half hour binning data
+    dirname  = join(basepath,'table_fit_data')
+    if not exists(dirname):
+        os.makedirs(dirname)
+    fname = join(dirname,dname+'.npy')
+    np.save(fname,arr)
+    print 'done with %s'%(dname)
+    return arr
+
+
+## generate list of D-region experiments, lstt, to use fitstat ##
+kk = sorted(os.listdir('/Volumes/scratch/AMISR_Work/spectra_Dregion'))
+listt=[]
+for i in kk:
+    string = join('/Volumes/scratch/AMISR_Work/spectra_Dregion',i)
+    if exists(join(string,'moments')):
+        if len(os.listdir(join(string,'moments'))) > 5 and len(os.listdir(join(string,'datfiles'))) >=2:
+            listt.append(string.split('/')[-1])
+
+
 
